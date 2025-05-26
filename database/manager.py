@@ -27,17 +27,9 @@ class DatabaseManager:
                 **MYSQL_CONFIG,
                 autocommit=True,
                 minsize=1,
-                maxsize=10,
-                # Подавляем предупреждения MySQL
-                init_command="SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO'"
+                maxsize=10
             )
             logger.info("Подключение к MySQL установлено")
-
-            # Дополнительно настраиваем подавление предупреждений
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute("SET SESSION sql_warnings = 0")
-
         except Exception as e:
             logger.error(f"Ошибка подключения к MySQL: {e}")
             raise
@@ -54,17 +46,15 @@ class DatabaseManager:
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS large_trades (
             id BIGINT PRIMARY KEY,
-            exchange VARCHAR(20) NOT NULL DEFAULT 'unknown',
             symbol VARCHAR(20) NOT NULL,
             base_asset VARCHAR(10),
-            price DECIMAL(30, 12) NOT NULL,
-            quantity DECIMAL(30, 12) NOT NULL,
-            value_usd DECIMAL(30, 2) NOT NULL,
+            price DECIMAL(20, 8) NOT NULL,
+            quantity DECIMAL(20, 8) NOT NULL,
+            value_usd DECIMAL(20, 2) NOT NULL,
             quote_asset VARCHAR(10) NOT NULL,
             is_buyer_maker BOOLEAN NOT NULL,
             trade_time DATETIME NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_exchange (exchange),
             INDEX idx_symbol (symbol),
             INDEX idx_base_asset (base_asset),
             INDEX idx_value_usd (value_usd),
@@ -74,58 +64,30 @@ class DatabaseManager:
 
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
-                # Подавляем предупреждения для этой сессии
-                await cursor.execute("SET SESSION sql_warnings = 0")
-
                 # Сначала создаем таблицу если не существует
                 await cursor.execute(create_table_sql)
 
-                # Проверяем и обновляем колонки при необходимости
-                await self._update_table_schema(cursor)
+                # Проверяем, есть ли колонка base_asset
+                check_column_sql = """
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = %s 
+                AND TABLE_NAME = 'large_trades' 
+                AND COLUMN_NAME = 'base_asset'
+                """
+                await cursor.execute(check_column_sql, (MYSQL_CONFIG['db'],))
+                result = await cursor.fetchone()
+
+                if result[0] == 0:
+                    # Колонки нет, нужно добавить
+                    logger.info("Добавляем колонку base_asset в существующую таблицу...")
+                    await cursor.execute("""
+                        ALTER TABLE large_trades 
+                        ADD COLUMN base_asset VARCHAR(10) AFTER symbol
+                    """)
+                    logger.info("Колонка base_asset добавлена")
 
                 logger.info("Таблица large_trades готова к работе")
-
-    async def _update_table_schema(self, cursor) -> None:
-        """Обновляет схему таблицы для поддержки больших значений."""
-
-        # Проверяем текущую структуру таблицы
-        await cursor.execute("DESCRIBE large_trades")
-        columns_info = await cursor.fetchall()
-        columns_dict = {row[0]: row[1] for row in columns_info}
-
-        schema_updates = []
-
-        # Проверяем колонку exchange
-        if 'exchange' not in columns_dict:
-            schema_updates.append("ADD COLUMN exchange VARCHAR(20) NOT NULL DEFAULT 'unknown' AFTER id")
-            schema_updates.append("ADD INDEX idx_exchange (exchange)")
-
-        # Проверяем колонку base_asset
-        if 'base_asset' not in columns_dict:
-            schema_updates.append("ADD COLUMN base_asset VARCHAR(10) AFTER symbol")
-
-        # Проверяем размеры DECIMAL полей и обновляем при необходимости
-        decimal_updates = []
-
-        if 'price' in columns_dict and not columns_dict['price'].startswith('decimal(30,'):
-            decimal_updates.append("MODIFY COLUMN price DECIMAL(30, 12) NOT NULL")
-
-        if 'quantity' in columns_dict and not columns_dict['quantity'].startswith('decimal(30,'):
-            decimal_updates.append("MODIFY COLUMN quantity DECIMAL(30, 12) NOT NULL")
-
-        if 'value_usd' in columns_dict and not columns_dict['value_usd'].startswith('decimal(30,'):
-            decimal_updates.append("MODIFY COLUMN value_usd DECIMAL(30, 2) NOT NULL")
-
-        # Выполняем обновления
-        all_updates = schema_updates + decimal_updates
-
-        for update in all_updates:
-            try:
-                await cursor.execute(f"ALTER TABLE large_trades {update}")
-                logger.info(f"Схема обновлена: {update}")
-            except Exception as e:
-                # Игнорируем ошибки если колонка уже существует или обновление не нужно
-                logger.debug(f"Обновление схемы пропущено: {update} - {e}")
 
     async def save_trades(self, trades: List[Trade]) -> Tuple[int, int]:
         """
@@ -142,38 +104,30 @@ class DatabaseManager:
 
         insert_sql = """
         INSERT IGNORE INTO large_trades 
-        (id, exchange, symbol, base_asset, price, quantity, value_usd, quote_asset, is_buyer_maker, trade_time)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (id, symbol, base_asset, price, quantity, value_usd, quote_asset, is_buyer_maker, trade_time)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
-        # Проверяем существующие ID (с учетом биржи для уникальности)
-        trade_keys = [(trade.exchange, int(trade.id)) for trade in trades]
-
-        # Создаем запрос для проверки существующих комбинаций exchange + id
-        check_conditions = []
-        check_params = []
-        for exchange, trade_id in trade_keys:
-            check_conditions.append("(exchange = %s AND id = %s)")
-            check_params.extend([exchange, trade_id])
-
-        check_sql = f"SELECT exchange, id FROM large_trades WHERE {' OR '.join(check_conditions)}"
+        # Проверяем существующие ID
+        trade_ids = [int(trade.id) for trade in trades]  # Преобразуем в int для Binance
+        placeholders = ','.join(['%s'] * len(trade_ids))
+        check_sql = f"SELECT id FROM large_trades WHERE id IN ({placeholders})"
 
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
-                # Получаем существующие комбинации exchange + id
-                await cursor.execute(check_sql, check_params)
-                existing_keys = {(row[0], row[1]) for row in await cursor.fetchall()}
+                # Получаем существующие ID
+                await cursor.execute(check_sql, trade_ids)
+                existing_ids = {row[0] for row in await cursor.fetchall()}
 
                 # Фильтруем новые сделки
                 new_trades = []
                 duplicate_count = 0
 
                 for trade in trades:
-                    trade_key = (trade.exchange, int(trade.id))
-                    if trade_key in existing_keys:
+                    if int(trade.id) in existing_ids:
                         duplicate_count += 1
-                        logger.debug(
-                            f"Дубликат: сделка {trade.exchange}:{trade.symbol} ID:{trade.id} "
+                        logger.info(
+                            f"Дубликат: сделка {trade.symbol} ID:{trade.id} "
                             f"на сумму ${trade.value_usd:,.2f} уже в БД"
                         )
                     else:
@@ -183,10 +137,9 @@ class DatabaseManager:
                 if new_trades:
                     values = [
                         (
-                            int(trade.id),
-                            trade.exchange,
+                            int(trade.id),  # Binance использует числовые ID
                             trade.symbol,
-                            trade.base_asset,
+                            trade.base_asset,  # Добавляем base_asset
                             float(trade.price),
                             float(trade.quantity),
                             float(trade.value_usd),
@@ -204,7 +157,7 @@ class DatabaseManager:
                         logger.info(f"Сохранено {saved_count} новых сделок в БД")
                         # Выводим информацию о новых сделках
                         for trade in new_trades[:5]:
-                            print(f"  НОВАЯ [{trade.exchange.upper()}]: {trade.symbol} ${trade.value_usd:,.2f} "
+                            print(f"  НОВАЯ: {trade.symbol} ${trade.value_usd:,.2f} "
                                   f"в {trade.trade_datetime.strftime('%H:%M:%S')}")
                         if len(new_trades) > 5:
                             print(f"  ... и еще {len(new_trades) - 5} сделок")
@@ -213,77 +166,49 @@ class DatabaseManager:
                 else:
                     return 0, duplicate_count
 
-    async def get_recent_trades_count(self, hours: int = 24, exchange: Optional[str] = None) -> int:
+    async def get_recent_trades_count(self, hours: int = 24) -> int:
         """
         Получает количество сделок за последние N часов.
 
         Args:
             hours: Количество часов
-            exchange: Фильтр по бирже (опционально)
 
         Returns:
             Количество сделок
         """
-        if exchange:
-            query = """
-            SELECT COUNT(*) 
-            FROM large_trades 
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL %s HOUR)
-            AND exchange = %s
-            """
-            params = (hours, exchange)
-        else:
-            query = """
-            SELECT COUNT(*) 
-            FROM large_trades 
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL %s HOUR)
-            """
-            params = (hours,)
+        query = """
+        SELECT COUNT(*) 
+        FROM large_trades 
+        WHERE trade_time > DATE_SUB(NOW(), INTERVAL %s HOUR)
+        """
 
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
-                await cursor.execute(query, params)
+                await cursor.execute(query, (hours,))
                 result = await cursor.fetchone()
                 return result[0] if result else 0
 
-    async def get_statistics(self, exchange: Optional[str] = None) -> dict:
+    async def get_statistics(self) -> dict:
         """
         Получает общую статистику.
-
-        Args:
-            exchange: Фильтр по бирже (опционально)
 
         Returns:
             Словарь со статистикой
         """
-        if exchange:
-            query = """
-            SELECT 
-                COUNT(*) as trade_count,
-                SUM(value_usd) as total_volume,
-                AVG(value_usd) as avg_trade_size,
-                MAX(value_usd) as max_trade_size
-            FROM large_trades
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            AND exchange = %s
-            """
-            params = (exchange,)
-        else:
-            query = """
-            SELECT 
-                COUNT(*) as trade_count,
-                SUM(value_usd) as total_volume,
-                AVG(value_usd) as avg_trade_size,
-                MAX(value_usd) as max_trade_size
-            FROM large_trades
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            """
-            params = ()
+        query = """
+        SELECT 
+            COUNT(*) as trade_count,
+            SUM(value_usd) as total_volume,
+            AVG(value_usd) as avg_trade_size,
+            MAX(value_usd) as max_trade_size
+        FROM large_trades
+        WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+        """
 
         stats = {}
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
-                await cursor.execute(query, params)
+                await cursor.execute(query)
                 row = await cursor.fetchone()
                 if row:
                     stats = {
@@ -293,39 +218,3 @@ class DatabaseManager:
                         'max_trade_size': float(row[3]) if row[3] else 0
                     }
         return stats
-
-    async def get_statistics_by_exchange(self) -> dict:
-        """
-        Получает статистику по каждой бирже отдельно.
-
-        Returns:
-            Словарь со статистикой по биржам
-        """
-        query = """
-        SELECT 
-            exchange,
-            COUNT(*) as trade_count,
-            SUM(value_usd) as total_volume,
-            AVG(value_usd) as avg_trade_size,
-            MAX(value_usd) as max_trade_size
-        FROM large_trades
-        WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
-        GROUP BY exchange
-        ORDER BY total_volume DESC
-        """
-
-        stats_by_exchange = {}
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(query)
-                rows = await cursor.fetchall()
-                for row in rows:
-                    exchange = row[0]
-                    stats_by_exchange[exchange] = {
-                        'trade_count': row[1] or 0,
-                        'total_volume': float(row[2]) if row[2] else 0,
-                        'avg_trade_size': float(row[3]) if row[3] else 0,
-                        'max_trade_size': float(row[4]) if row[4] else 0
-                    }
-
-        return stats_by_exchange

@@ -29,7 +29,6 @@ class BybitClient(ExchangeBase):
         self.config = EXCHANGES_CONFIG['bybit']
         self.base_url = self.config['api_url']
         self.weights = self.config['weights']
-        self.exchange_name = 'bybit'
 
     async def test_connection(self) -> bool:
         """
@@ -189,10 +188,20 @@ class BybitClient(ExchangeBase):
         Returns:
             Объект Trade
         """
-        return Trade.from_bybit_response(
-            trade_data,
-            pair_info.symbol,
-            pair_info.base_asset,
-            pair_info.quote_asset,
-            pair_info.quote_price_usd
+        from decimal import Decimal
+
+        price = Decimal(str(trade_data['price']))
+        size = Decimal(str(trade_data['size']))
+        value_usd = price * size * pair_info.quote_price_usd
+
+        return Trade(
+            id=str(trade_data['execId']),  # В Bybit используется execId как уникальный ID
+            symbol=pair_info.symbol,
+            base_asset=pair_info.base_asset,
+            price=price,
+            quantity=size,
+            value_usd=value_usd,
+            quote_asset=pair_info.quote_asset,
+            is_buyer_maker=trade_data['side'] == 'Sell',  # В Bybit Sell = buyer maker
+            trade_time=int(trade_data['time'])  # Bybit возвращает время в миллисекундах
         )
