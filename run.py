@@ -56,6 +56,22 @@ try:
 except Exception as e:
     print(f"Ошибка при проверке зависимостей: {e}")
 
+# Быстрая проверка конфигурации
+print("\n🔍 Быстрая проверка конфигурации...")
+try:
+    result = subprocess.run([python_path, 'quick_check.py'], capture_output=True, text=True)
+    if result.returncode != 0:
+        print("❌ Проблемы с конфигурацией:")
+        print(result.stdout)
+        print(result.stderr)
+        print("Запускаем полную проверку...")
+        subprocess.run([python_path, 'check_config.py'])
+        sys.exit(1)
+    else:
+        print(result.stdout)
+except FileNotFoundError:
+    print("⚠️  Скрипт проверки не найден, продолжаем запуск...")
+
 # Запускаем основной скрипт
 print("Запуск мониторинга...")
 subprocess.run([python_path, 'main.py'])
