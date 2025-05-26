@@ -9,7 +9,7 @@ STABLECOINS = {
     'AGEUR', 'AEUR', 'STEUR', 'EURS', 'EURT', 'EURC', 'PAX',
     'FDUSD', 'PYUSD', 'USDB', 'USDJ', 'USDX', 'USDQ', 'TRIBE',
     'XUSD', 'DAI', 'USDN', 'USDZ', 'HUSD', 'UST', 'MUSD',
-    'SUSD', 'USDK', 'USDH', 'USDS', 'USDEX', 'FLEXUSD'
+    'SUSD', 'USDK', 'USDH', 'USDS', 'USDEX', 'FLEXUSD', 'USDE'
 }
 
 # Wrapped токены для исключения

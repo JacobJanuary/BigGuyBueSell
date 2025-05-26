@@ -61,9 +61,9 @@ class BybitAnalyzer(ExchangeAnalyzerBase):
                 self.quote_prices_usd['USDC'] = Decimal(str(ticker['lastPrice']))
 
     def filter_trading_pairs(
-            self,
-            instruments_info: Dict,
-            tickers: List[Dict]
+        self,
+        instruments_info: Dict,
+        tickers: List[Dict]
     ) -> List[TradingPairInfo]:
         """
         Фильтрует торговые пары по критериям.
