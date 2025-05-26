@@ -126,13 +126,26 @@ class DatabaseManager:
             return 0, 0
 
         insert_sql = """
-        INSERT IGNORE INTO large_trades 
+                     INSERT \
+                     IGNORE INTO large_trades 
         (id, exchange, symbol, base_asset, price, quantity, value_usd, quote_asset, is_buyer_maker, trade_time)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
+        VALUES ( \
+                     %s, \
+                     %s, \
+                     %s, \
+                     %s, \
+                     %s, \
+                     %s, \
+                     %s, \
+                     %s, \
+                     %s, \
+                     %s \
+                     ) \
+                     """
 
         # Проверяем существующие ID (с учетом биржи для уникальности)
-        trade_keys = [(trade.exchange, int(trade.id)) for trade in trades]
+        trade_keys = [(trade.exchange, int(trade.id) if trade.id.isdigit() else hash(trade.id) % (2 ** 63 - 1)) for
+                      trade in trades]
 
         # Создаем запрос для проверки существующих комбинаций exchange + id
         check_conditions = []
@@ -154,7 +167,14 @@ class DatabaseManager:
                 duplicate_count = 0
 
                 for trade in trades:
-                    trade_key = (trade.exchange, int(trade.id))
+                    # Генерируем тот же ID что будет в БД
+                    try:
+                        trade_id = int(trade.id) if trade.id.isdigit() else hash(trade.id) % (2 ** 63 - 1)
+                    except (ValueError, AttributeError):
+                        trade_id = hash(str(trade.id)) % (2 ** 63 - 1)
+
+                    trade_key = (trade.exchange, trade_id)
+
                     if trade_key in existing_keys:
                         duplicate_count += 1
                         logger.debug(
@@ -166,10 +186,17 @@ class DatabaseManager:
 
                 # Сохраняем только новые сделки
                 if new_trades:
-                    values = [
-                        (
-                            int(trade.id),
-                            trade.exchange,
+                    values = []
+                    for trade in new_trades:
+                        # Генерируем ID для вставки
+                        try:
+                            trade_id = int(trade.id) if trade.id.isdigit() else hash(trade.id) % (2 ** 63 - 1)
+                        except (ValueError, AttributeError):
+                            trade_id = hash(str(trade.id)) % (2 ** 63 - 1)
+
+                        values.append((
+                            trade_id,
+                            trade.exchange,  # Убеждаемся что exchange берется из объекта Trade
                             trade.symbol,
                             trade.base_asset,
                             float(trade.price),
@@ -178,16 +205,14 @@ class DatabaseManager:
                             trade.quote_asset,
                             trade.is_buyer_maker,
                             trade.trade_datetime
-                        )
-                        for trade in new_trades
-                    ]
+                        ))
 
                     await cursor.executemany(insert_sql, values)
                     saved_count = cursor.rowcount
 
                     if saved_count > 0:
                         logger.info(f"Сохранено {saved_count} новых сделок в БД")
-                        # Выводим информацию о новых сделках
+                        # Выводим информацию о новых сделках с указанием биржи
                         for trade in new_trades[:5]:
                             print(f"  НОВАЯ [{trade.exchange.upper()}]: {trade.symbol} ${trade.value_usd:,.2f} "
                                   f"в {trade.trade_datetime.strftime('%H:%M:%S')}")

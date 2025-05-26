@@ -1,5 +1,5 @@
 """
-Общие настройки проекта для мониторинга крупных сделок.
+Исправленные настройки проекта для мониторинга крупных сделок.
 """
 import os
 from typing import Dict, Any
@@ -8,38 +8,57 @@ from dotenv import load_dotenv
 # Загружаем переменные окружения
 load_dotenv()
 
+def get_env_int(key: str, default: int) -> int:
+    """Безопасно получает integer из переменных окружения."""
+    try:
+        value = os.getenv(key)
+        if value is None:
+            return default
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+def get_env_bool(key: str, default: bool) -> bool:
+    """Безопасно получает boolean из переменных окружения."""
+    value = os.getenv(key, '').lower()
+    if value in ('true', '1', 'yes', 'on'):
+        return True
+    elif value in ('false', '0', 'no', 'off'):
+        return False
+    return default
+
 # MySQL конфигурация
 MYSQL_CONFIG: Dict[str, Any] = {
     'host': os.getenv('MYSQL_HOST', 'localhost'),
-    'port': int(os.getenv('MYSQL_PORT', 3306)),
+    'port': get_env_int('MYSQL_PORT', 3306),
     'user': os.getenv('MYSQL_USER', 'root'),
     'password': os.getenv('MYSQL_PASSWORD', ''),
     'db': os.getenv('MYSQL_DATABASE', 'crypto_db'),
 }
 
-# Фильтры для сделок
-MIN_VOLUME_USD = 1_000_000  # Минимальный объем торгов за 24 часа
-MIN_TRADE_VALUE_USD = 49_000  # Минимальная сумма сделки для вывода
+# Основные настройки
+MIN_VOLUME_USD = get_env_int('MIN_VOLUME_USD', 1_000_000)
+MIN_TRADE_VALUE_USD = get_env_int('MIN_TRADE_VALUE_USD', 49_000)
+MAX_CONCURRENT_REQUESTS = get_env_int('MAX_CONCURRENT_REQUESTS', 3)
+MAX_WEIGHT_PER_MINUTE = get_env_int('MAX_WEIGHT_PER_MINUTE', 1200)
+DELAY_BETWEEN_REQUESTS = float(os.getenv('DELAY_BETWEEN_REQUESTS', '0.2'))
+RETRY_DELAY = get_env_int('RETRY_DELAY', 5)
+MAX_RETRIES = get_env_int('MAX_RETRIES', 3)
+MONITORING_PAUSE_MINUTES = get_env_int('MONITORING_PAUSE_MINUTES', 5)
+BATCH_SIZE = get_env_int('BATCH_SIZE', 30)
+STATS_REPORT_MINUTES = get_env_int('STATS_REPORT_MINUTES', 10)
+HEALTH_CHECK_MINUTES = get_env_int('HEALTH_CHECK_MINUTES', 15)
+DISABLE_SSL_VERIFY = get_env_bool('DISABLE_SSL_VERIFY', False)
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 
-# Rate limit настройки
-MAX_CONCURRENT_REQUESTS = 3
-MAX_WEIGHT_PER_MINUTE = 1200
-DELAY_BETWEEN_REQUESTS = 0.2
-RETRY_DELAY = 5
-MAX_RETRIES = 3
-
-# Настройки мониторинга
-MONITORING_PAUSE_MINUTES = 5  # Пауза между циклами мониторинга
-BATCH_SIZE = 30  # Размер батча для обработки пар
-
-# SSL настройки
-DISABLE_SSL_VERIFY = os.getenv('DISABLE_SSL_VERIFY', 'false').lower() == 'true'
-
-# Настройки для разных бирж
+# Конфигурация бирж
 EXCHANGES_CONFIG = {
     'binance': {
         'api_url': 'https://api.binance.com',
-        'trades_limit': 1000,
+        'trades_limit': get_env_int('BINANCE_TRADES_LIMIT', 1000),
+        'cycle_pause_minutes': get_env_int('BINANCE_CYCLE_MINUTES', 5),
+        'rate_limit': get_env_int('BINANCE_RATE_LIMIT', MAX_WEIGHT_PER_MINUTE),
+        'enabled': get_env_bool('BINANCE_ENABLED', True),
         'weights': {
             'trades': 10,
             'exchange_info': 20,
@@ -48,7 +67,22 @@ EXCHANGES_CONFIG = {
     },
     'bybit': {
         'api_url': 'https://api.bybit.com',
-        'trades_limit': 60,  # Bybit ограничивает до 60 для спота
+        'trades_limit': get_env_int('BYBIT_TRADES_LIMIT', 60),
+        'cycle_pause_minutes': get_env_int('BYBIT_CYCLE_MINUTES', 3),
+        'rate_limit': get_env_int('BYBIT_RATE_LIMIT', MAX_WEIGHT_PER_MINUTE),
+        'enabled': get_env_bool('BYBIT_ENABLED', True),
+        'weights': {
+            'trades': 1,
+            'exchange_info': 1,
+            'tickers': 1
+        }
+    },
+    'coinbase': {
+        'api_url': 'https://api.exchange.coinbase.com',
+        'trades_limit': get_env_int('COINBASE_TRADES_LIMIT', 1000),
+        'cycle_pause_minutes': get_env_int('COINBASE_CYCLE_MINUTES', 7),
+        'rate_limit': get_env_int('COINBASE_RATE_LIMIT', 600),
+        'enabled': get_env_bool('COINBASE_ENABLED', True),
         'weights': {
             'trades': 1,
             'exchange_info': 1,
@@ -57,7 +91,10 @@ EXCHANGES_CONFIG = {
     },
     'okx': {
         'api_url': 'https://www.okx.com',
-        'trades_limit': 100,
+        'trades_limit': get_env_int('OKX_TRADES_LIMIT', 100),
+        'cycle_pause_minutes': get_env_int('OKX_CYCLE_MINUTES', 4),
+        'rate_limit': get_env_int('OKX_RATE_LIMIT', MAX_WEIGHT_PER_MINUTE),
+        'enabled': get_env_bool('OKX_ENABLED', False),
         'weights': {
             'trades': 1,
             'exchange_info': 1,
@@ -65,3 +102,14 @@ EXCHANGES_CONFIG = {
         }
     }
 }
+
+# Отладочная информация
+if LOG_LEVEL == 'DEBUG':
+    print("🔧 Загруженные настройки:")
+    print(f"  MySQL: {MYSQL_CONFIG['host']}:{MYSQL_CONFIG['port']}")
+    print(f"  SSL проверка: {'отключена' if DISABLE_SSL_VERIFY else 'включена'}")
+    for exchange, config in EXCHANGES_CONFIG.items():
+        if config['enabled']:
+            print(f"  {exchange.upper()}: пауза {config['cycle_pause_minutes']}мин, лимит {config['rate_limit']}/мин")
+        else:
+            print(f"  {exchange.upper()}: ОТКЛЮЧЕН")

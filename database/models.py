@@ -47,9 +47,17 @@ class Trade:
 
     def to_db_values(self) -> tuple:
         """Преобразует объект в кортеж значений для БД."""
+        # Для более надежной работы с ID разных типов
+        try:
+            # Пытаемся преобразовать в int
+            trade_id = int(self.id) if self.id.isdigit() else hash(self.id) % (2**63 - 1)
+        except (ValueError, AttributeError):
+            # Если не получается, используем хеш
+            trade_id = hash(str(self.id)) % (2**63 - 1)
+
         return (
-            int(self.id),  # Binance использует числовые ID
-            self.exchange,
+            trade_id,
+            self.exchange,  # Это поле должно содержать правильное значение
             self.symbol,
             self.base_asset,
             float(self.price),
@@ -137,6 +145,57 @@ class Trade:
             is_buyer_maker=data['side'] == 'Sell',  # В Bybit Sell = buyer maker
             trade_time=int(data['time'])
         )
+
+    @classmethod
+    def from_coinbase_response(
+        cls,
+        data: Dict,
+        symbol: str,
+        base_asset: str,
+        quote_asset: str,
+        quote_price_usd: Decimal
+    ) -> 'Trade':
+        """
+        Создает объект Trade из ответа Coinbase API.
+
+        Args:
+            data: Словарь с данными сделки от API
+            symbol: Символ торговой пары
+            base_asset: Базовый актив
+            quote_asset: Котировочный актив
+            quote_price_usd: Цена котировочного актива в USD
+
+        Returns:
+            Объект Trade
+        """
+        price = Decimal(str(data['price']))
+        size = Decimal(str(data['size']))
+        value_usd = price * size * quote_price_usd
+
+        # В Coinbase время в ISO формате, конвертируем в timestamp
+        from dateutil.parser import parse
+        trade_datetime = parse(data['time'])
+        trade_time_ms = int(trade_datetime.timestamp() * 1000)
+
+        trade = cls(
+            id=str(data['trade_id']),
+            exchange='coinbase',  # Явно указываем exchange
+            symbol=symbol,
+            base_asset=base_asset,
+            price=price,
+            quantity=size,
+            value_usd=value_usd,
+            quote_asset=quote_asset,
+            is_buyer_maker=data['side'] == 'sell',  # В Coinbase sell = buyer maker
+            trade_time=trade_time_ms
+        )
+
+        # Отладочная информация для первых сделок
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Создана сделка Coinbase: {trade.exchange} - {symbol} - ${value_usd:.2f}")
+
+        return trade
 
 
 @dataclass
