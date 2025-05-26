@@ -29,7 +29,7 @@ RETRY_DELAY = 5
 MAX_RETRIES = 3
 
 # Настройки мониторинга
-MONITORING_PAUSE_MINUTES = 5  # Пауза между циклами мониторинга
+MONITORING_PAUSE_MINUTES = 1  # Пауза между циклами мониторинга
 BATCH_SIZE = 30  # Размер батча для обработки пар
 
 # SSL настройки

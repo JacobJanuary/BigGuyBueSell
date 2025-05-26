@@ -16,6 +16,7 @@ class Trade:
         id: Уникальный идентификатор сделки
         exchange: Название биржи
         symbol: Символ торговой пары
+        base_asset: Базовый актив
         price: Цена сделки
         quantity: Количество в сделке
         value_usd: Примерная стоимость в USD
@@ -24,6 +25,7 @@ class Trade:
         trade_time: Время сделки (timestamp в миллисекундах)
     """
     id: str  # Строка для совместимости с разными биржами
+    exchange: str  # Название биржи
     symbol: str
     base_asset: str
     price: Decimal
@@ -47,7 +49,9 @@ class Trade:
         """Преобразует объект в кортеж значений для БД."""
         return (
             int(self.id),  # Binance использует числовые ID
+            self.exchange,
             self.symbol,
+            self.base_asset,
             float(self.price),
             float(self.quantity),
             float(self.value_usd),
@@ -84,6 +88,7 @@ class Trade:
 
         return cls(
             id=str(data['id']),
+            exchange='binance',
             symbol=symbol,
             base_asset=base_asset,
             price=price,
@@ -92,6 +97,45 @@ class Trade:
             quote_asset=quote_asset,
             is_buyer_maker=data['isBuyerMaker'],
             trade_time=data['time']
+        )
+
+    @classmethod
+    def from_bybit_response(
+        cls,
+        data: Dict,
+        symbol: str,
+        base_asset: str,
+        quote_asset: str,
+        quote_price_usd: Decimal
+    ) -> 'Trade':
+        """
+        Создает объект Trade из ответа Bybit API.
+
+        Args:
+            data: Словарь с данными сделки от API
+            symbol: Символ торговой пары
+            base_asset: Базовый актив
+            quote_asset: Котировочный актив
+            quote_price_usd: Цена котировочного актива в USD
+
+        Returns:
+            Объект Trade
+        """
+        price = Decimal(str(data['price']))
+        size = Decimal(str(data['size']))
+        value_usd = price * size * quote_price_usd
+
+        return cls(
+            id=str(data['execId']),
+            exchange='bybit',
+            symbol=symbol,
+            base_asset=base_asset,
+            price=price,
+            quantity=size,
+            value_usd=value_usd,
+            quote_asset=quote_asset,
+            is_buyer_maker=data['side'] == 'Sell',  # В Bybit Sell = buyer maker
+            trade_time=int(data['time'])
         )
 
 

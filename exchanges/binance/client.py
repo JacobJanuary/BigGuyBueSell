@@ -29,6 +29,7 @@ class BinanceClient(ExchangeBase):
         self.config = EXCHANGES_CONFIG['binance']
         self.base_url = self.config['api_url']
         self.weights = self.config['weights']
+        self.exchange_name = 'binance'
 
     async def test_connection(self) -> bool:
         """
