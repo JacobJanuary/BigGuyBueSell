@@ -1,29 +1,30 @@
 """
-Воркер для независимой обработки одной биржи.
+Воркер для независимой обработки одной биржи с использованием кэша торговых пар.
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from config.settings import MIN_TRADE_VALUE_USD, BATCH_SIZE, MAX_CONCURRENT_REQUESTS
+from config.settings import MIN_TRADE_VALUE_USD, BATCH_SIZE, MAX_CONCURRENT_REQUESTS, PAIRS_CACHE_TTL_HOURS
 from database.manager import DatabaseManager
-from database.models import Trade
+from database.pairs_cache import PairsCacheManager
+from database.models import Trade, TradingPairInfo
 
 logger = logging.getLogger(__name__)
 
 
 class ExchangeWorker:
-    """Независимый воркер для обработки одной биржи."""
+    """Независимый воркер для обработки одной биржи с кэшированием пар."""
 
     def __init__(
-            self,
-            exchange_name: str,
-            client,
-            analyzer,
-            db_manager: DatabaseManager,
-            cycle_pause_minutes: int = 5
+        self,
+        exchange_name: str,
+        client,
+        analyzer,
+        db_manager: DatabaseManager,
+        cycle_pause_minutes: int = 5
     ):
         """
         Инициализирует воркер биржи.
@@ -42,13 +43,20 @@ class ExchangeWorker:
         self.cycle_pause_minutes = cycle_pause_minutes
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
+        # Менеджер кэша торговых пар
+        self.pairs_cache = PairsCacheManager(db_manager.pool)
+
+        # Время последнего обновления кэша
+        self.last_cache_update = None
+
         # Статистика
         self.cycle_count = 0
         self.total_trades_found = 0
         self.total_trades_saved = 0
+        self.cache_updates_count = 0
         self.is_running = False
 
-    async def process_pair(self, pair_info) -> List[Trade]:
+    async def process_pair(self, pair_info: TradingPairInfo) -> List[Trade]:
         """
         Обрабатывает одну торговую пару.
 
@@ -77,15 +85,46 @@ class ExchangeWorker:
                 logger.debug(f"[{self.exchange_name.upper()}] Ошибка обработки пары {pair_info.symbol}: {e}")
                 return []
 
-    async def get_filtered_pairs(self):
+    async def get_trading_pairs(self) -> Optional[List[TradingPairInfo]]:
         """
-        Получает отфильтрованные торговые пары для биржи.
+        Получает список торговых пар (из кэша или API).
 
         Returns:
             Список торговых пар или None в случае ошибки
         """
         try:
-            # Получаем информацию о парах в зависимости от биржи
+            # Проверяем актуальность кэша
+            cache_fresh = await self.pairs_cache.is_cache_fresh(
+                self.exchange_name,
+                PAIRS_CACHE_TTL_HOURS
+            )
+
+            if cache_fresh:
+                # Используем кэш
+                logger.debug(f"[{self.exchange_name.upper()}] Используем кэш торговых пар")
+                pairs = await self.pairs_cache.get_cached_pairs(self.exchange_name)
+                if pairs:
+                    return pairs
+                else:
+                    logger.warning(f"[{self.exchange_name.upper()}] Кэш пуст, обновляем...")
+
+            # Кэш устарел или пуст - обновляем через API
+            logger.info(f"[{self.exchange_name.upper()}] Обновление кэша торговых пар...")
+            return await self.update_pairs_cache()
+
+        except Exception as e:
+            logger.error(f"[{self.exchange_name.upper()}] Ошибка получения торговых пар: {e}")
+            return None
+
+    async def update_pairs_cache(self) -> Optional[List[TradingPairInfo]]:
+        """
+        Обновляет кэш торговых пар через API.
+
+        Returns:
+            Список отфильтрованных пар или None в случае ошибки
+        """
+        try:
+            # Получаем данные через API в зависимости от биржи
             if self.exchange_name == 'binance':
                 exchange_info = await self.client.get_exchange_info()
                 tickers = await self.client.get_24hr_tickers()
@@ -99,16 +138,47 @@ class ExchangeWorker:
                 tickers = await self.client.get_24hr_tickers()
                 filtered_pairs = self.analyzer.filter_trading_pairs(products_info, tickers)
             else:
-                logger.error(f"[{self.exchange_name.upper()}] Неизвестная биржа")
+                logger.error(f"[{self.exchange_name.upper()}] Неизвестная биржа для обновления кэша")
                 return None
 
-            # Сортируем по объему
-            filtered_pairs.sort(key=lambda x: x.volume_24h_usd, reverse=True)
+            if not filtered_pairs:
+                logger.warning(f"[{self.exchange_name.upper()}] API не вернул торговых пар")
+                return None
+
+            # Обновляем кэш в БД
+            added, updated, deactivated = await self.pairs_cache.update_pairs_cache(
+                self.exchange_name,
+                filtered_pairs
+            )
+
+            self.cache_updates_count += 1
+            self.last_cache_update = datetime.now()
+
+            logger.info(
+                f"[{self.exchange_name.upper()}] Кэш обновлен: "
+                f"+{added} ~{updated} -{deactivated}, итого {len(filtered_pairs)} активных пар"
+            )
+
             return filtered_pairs
 
         except Exception as e:
-            logger.error(f"[{self.exchange_name.upper()}] Ошибка получения пар: {e}")
+            logger.error(f"[{self.exchange_name.upper()}] Ошибка обновления кэша: {e}")
             return None
+
+    async def should_update_cache(self) -> bool:
+        """
+        Определяет, нужно ли обновлять кэш.
+
+        Returns:
+            True если пора обновлять кэш
+        """
+        if not self.last_cache_update:
+            return True
+
+        time_since_update = datetime.now() - self.last_cache_update
+        update_interval_seconds = PAIRS_CACHE_TTL_HOURS * 3600
+
+        return time_since_update.total_seconds() >= update_interval_seconds
 
     async def run_cycle(self) -> Dict:
         """
@@ -123,10 +193,10 @@ class ExchangeWorker:
         logger.info(f"[{self.exchange_name.upper()}] Начало цикла #{self.cycle_count}")
 
         try:
-            # Получаем пары
-            filtered_pairs = await self.get_filtered_pairs()
-            if not filtered_pairs:
-                logger.warning(f"[{self.exchange_name.upper()}] Не найдено подходящих пар")
+            # Получаем торговые пары (из кэша или API)
+            trading_pairs = await self.get_trading_pairs()
+            if not trading_pairs:
+                logger.warning(f"[{self.exchange_name.upper()}] Не удалось получить торговые пары")
                 return {
                     'exchange': self.exchange_name,
                     'cycle': self.cycle_count,
@@ -135,12 +205,16 @@ class ExchangeWorker:
                     'trades_saved': 0,
                     'duplicates': 0,
                     'duration': 0,
-                    'error': 'Нет пар'
+                    'cache_used': False,
+                    'error': 'Нет торговых пар'
                 }
+
+            # Сортируем по объему
+            trading_pairs.sort(key=lambda x: x.volume_24h_usd, reverse=True)
 
             # Показываем топ-5 пар
             logger.info(f"[{self.exchange_name.upper()}] Топ-5 пар по объему:")
-            for i, pair in enumerate(filtered_pairs[:5], 1):
+            for i, pair in enumerate(trading_pairs[:5], 1):
                 logger.info(f"  {i}. {pair.symbol}: ${pair.volume_24h_usd:,.0f}")
 
             cycle_trades_found = 0
@@ -148,8 +222,8 @@ class ExchangeWorker:
             cycle_duplicates = 0
 
             # Обрабатываем пары батчами
-            for i in range(0, len(filtered_pairs), BATCH_SIZE):
-                batch = filtered_pairs[i:i + BATCH_SIZE]
+            for i in range(0, len(trading_pairs), BATCH_SIZE):
+                batch = trading_pairs[i:i + BATCH_SIZE]
 
                 # Создаем задачи для батча
                 tasks = [
@@ -163,6 +237,7 @@ class ExchangeWorker:
                 batch_trades = []
                 for result in results:
                     if isinstance(result, Exception):
+                        logger.debug(f"[{self.exchange_name.upper()}] Исключение в обработке пары: {result}")
                         continue
                     batch_trades.extend(result)
 
@@ -174,15 +249,15 @@ class ExchangeWorker:
                     cycle_trades_found += len(batch_trades)
 
                 # Прогресс
-                processed = min(i + BATCH_SIZE, len(filtered_pairs))
+                processed = min(i + BATCH_SIZE, len(trading_pairs))
                 if len(batch_trades) > 0:
                     logger.info(
-                        f"[{self.exchange_name.upper()}] {processed}/{len(filtered_pairs)} пар | "
+                        f"[{self.exchange_name.upper()}] {processed}/{len(trading_pairs)} пар | "
                         f"Найдено: {len(batch_trades)} | Новых: {new_count} | Дубли: {dup_count}"
                     )
 
                 # Небольшая пауза между батчами
-                if i + BATCH_SIZE < len(filtered_pairs):
+                if i + BATCH_SIZE < len(trading_pairs):
                     await asyncio.sleep(0.5)
 
             # Обновляем общую статистику
@@ -199,11 +274,13 @@ class ExchangeWorker:
             return {
                 'exchange': self.exchange_name,
                 'cycle': self.cycle_count,
-                'pairs_count': len(filtered_pairs),
+                'pairs_count': len(trading_pairs),
                 'trades_found': cycle_trades_found,
                 'trades_saved': cycle_trades_saved,
                 'duplicates': cycle_duplicates,
                 'duration': cycle_duration,
+                'cache_used': True,
+                'cache_updates': self.cache_updates_count,
                 'error': None
             }
 
@@ -219,6 +296,8 @@ class ExchangeWorker:
                 'trades_saved': 0,
                 'duplicates': 0,
                 'duration': cycle_duration,
+                'cache_used': False,
+                'cache_updates': self.cache_updates_count,
                 'error': str(e)
             }
 
@@ -227,8 +306,18 @@ class ExchangeWorker:
         Запускает непрерывный цикл обработки биржи.
         """
         self.is_running = True
-        logger.info(
-            f"[{self.exchange_name.upper()}] Запуск непрерывного мониторинга (пауза {self.cycle_pause_minutes} мин)")
+        logger.info(f"[{self.exchange_name.upper()}] Запуск непрерывного мониторинга (пауза {self.cycle_pause_minutes} мин)")
+
+        # При первом запуске проверяем и инициализируем кэш
+        logger.info(f"[{self.exchange_name.upper()}] Инициализация кэша торговых пар...")
+        try:
+            initial_pairs = await self.get_trading_pairs()
+            if initial_pairs:
+                logger.info(f"[{self.exchange_name.upper()}] Инициализация завершена, найдено {len(initial_pairs)} пар")
+            else:
+                logger.warning(f"[{self.exchange_name.upper()}] Не удалось инициализировать кэш")
+        except Exception as e:
+            logger.error(f"[{self.exchange_name.upper()}] Ошибка инициализации кэша: {e}")
 
         while self.is_running:
             try:
@@ -272,5 +361,7 @@ class ExchangeWorker:
             'cycle_count': self.cycle_count,
             'total_trades_found': self.total_trades_found,
             'total_trades_saved': self.total_trades_saved,
+            'cache_updates_count': self.cache_updates_count,
+            'last_cache_update': self.last_cache_update.isoformat() if self.last_cache_update else None,
             'is_running': self.is_running
         }

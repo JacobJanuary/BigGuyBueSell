@@ -47,23 +47,53 @@ class StatisticsManager:
 
         # Статистика воркеров
         if self.workers:
-            print(f"{'Биржа':>12} | {'Циклов':>8} | {'Найдено':>10} | {'Сохранено':>12} | {'Статус':>10}")
+            print(f"{'Биржа':>12} | {'Циклов':>8} | {'Найдено':>10} | {'Сохранено':>12} | {'Кэш обн.':>10} | {'Статус':>10}")
             print(f"{'-' * 100}")
 
             for worker in self.workers:
                 stats = worker.get_stats()
                 status = "🟢 Работает" if stats['is_running'] else "🔴 Остановлен"
+                cache_updates = stats.get('cache_updates_count', 0)
+
                 print(f"{stats['exchange'].upper():>12} | "
                       f"{stats['cycle_count']:>8} | "
                       f"{stats['total_trades_found']:>10} | "
                       f"{stats['total_trades_saved']:>12} | "
+                      f"{cache_updates:>10} | "
                       f"{status:>10}")
+
+        # Статистика кэша торговых пар
+        try:
+            from database.pairs_cache import PairsCacheManager
+            pairs_cache = PairsCacheManager(self.db_manager.pool)
+
+            print(f"\n📊 Статистика кэша торговых пар:")
+            print(f"{'Биржа':>12} | {'Всего пар':>12} | {'Активных':>10} | {'Средний объем':>15} | {'Обновление':>20}")
+            print(f"{'-' * 90}")
+
+            for worker in self.workers:
+                exchange = worker.exchange_name
+                cache_stats = await pairs_cache.get_cache_stats(exchange)
+
+                last_update = "Никогда"
+                if cache_stats['last_update']:
+                    last_update = cache_stats['last_update'].strftime('%H:%M:%S')
+
+                avg_volume = cache_stats['avg_volume']
+                print(f"{exchange.upper():>12} | "
+                      f"{cache_stats['total_pairs']:>12} | "
+                      f"{cache_stats['active_pairs']:>10} | "
+                      f"${avg_volume:>14,.0f} | "
+                      f"{last_update:>20}")
+
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики кэша: {e}")
 
         # Статистика из БД за 24 часа
         try:
             stats_by_exchange = await self.db_manager.get_statistics_by_exchange()
             if stats_by_exchange:
-                print(f"\nСтатистика за 24 часа из БД:")
+                print(f"\nСтатистика сделок за 24 часа:")
                 print(f"{'Биржа':>12} | {'Сделок':>8} | {'Объем, $':>15} | {'Средний размер, $':>18}")
                 print(f"{'-' * 80}")
 

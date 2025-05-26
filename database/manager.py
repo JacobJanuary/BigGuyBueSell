@@ -44,25 +44,69 @@ class DatabaseManager:
     async def create_tables(self) -> None:
         """Создает необходимые таблицы, если они не существуют."""
         create_table_sql = """
-        CREATE TABLE IF NOT EXISTS large_trades (
-            id BIGINT PRIMARY KEY,
-            exchange VARCHAR(20) NOT NULL DEFAULT 'unknown',
-            symbol VARCHAR(20) NOT NULL,
-            base_asset VARCHAR(10),
-            price DECIMAL(20, 8) NOT NULL,
-            quantity DECIMAL(20, 8) NOT NULL,
-            value_usd DECIMAL(20, 2) NOT NULL,
-            quote_asset VARCHAR(10) NOT NULL,
-            is_buyer_maker BOOLEAN NOT NULL,
-            trade_time DATETIME NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_exchange (exchange),
-            INDEX idx_symbol (symbol),
-            INDEX idx_base_asset (base_asset),
-            INDEX idx_value_usd (value_usd),
-            INDEX idx_trade_time (trade_time)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """
+                           CREATE TABLE IF NOT EXISTS large_trades
+                           (
+                               id
+                               BIGINT
+                               PRIMARY
+                               KEY,
+                               exchange
+                               VARCHAR
+                           (
+                               20
+                           ) NOT NULL DEFAULT 'unknown',
+                               symbol VARCHAR
+                           (
+                               20
+                           ) NOT NULL,
+                               base_asset VARCHAR
+                           (
+                               10
+                           ),
+                               price DECIMAL
+                           (
+                               20,
+                               8
+                           ) NOT NULL,
+                               quantity DECIMAL
+                           (
+                               20,
+                               8
+                           ) NOT NULL,
+                               value_usd DECIMAL
+                           (
+                               20,
+                               2
+                           ) NOT NULL,
+                               quote_asset VARCHAR
+                           (
+                               10
+                           ) NOT NULL,
+                               is_buyer_maker BOOLEAN NOT NULL,
+                               trade_time DATETIME NOT NULL,
+                               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                               INDEX idx_exchange
+                           (
+                               exchange
+                           ),
+                               INDEX idx_symbol
+                           (
+                               symbol
+                           ),
+                               INDEX idx_base_asset
+                           (
+                               base_asset
+                           ),
+                               INDEX idx_value_usd
+                           (
+                               value_usd
+                           ),
+                               INDEX idx_trade_time
+                           (
+                               trade_time
+                           )
+                               ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci; \
+                           """
 
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
@@ -71,12 +115,12 @@ class DatabaseManager:
 
                 # Проверяем, есть ли колонка exchange
                 check_exchange_column_sql = """
-                SELECT COUNT(*) 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_SCHEMA = %s 
-                AND TABLE_NAME = 'large_trades' 
-                AND COLUMN_NAME = 'exchange'
-                """
+                                            SELECT COUNT(*)
+                                            FROM INFORMATION_SCHEMA.COLUMNS
+                                            WHERE TABLE_SCHEMA = %s
+                                              AND TABLE_NAME = 'large_trades'
+                                              AND COLUMN_NAME = 'exchange' \
+                                            """
                 await cursor.execute(check_exchange_column_sql, (MYSQL_CONFIG['db'],))
                 result = await cursor.fetchone()
 
@@ -84,20 +128,20 @@ class DatabaseManager:
                     # Колонки exchange нет, нужно добавить
                     logger.info("Добавляем колонку exchange в существующую таблицу...")
                     await cursor.execute("""
-                        ALTER TABLE large_trades 
-                        ADD COLUMN exchange VARCHAR(20) NOT NULL DEFAULT 'unknown' AFTER id,
+                                         ALTER TABLE large_trades
+                                             ADD COLUMN exchange VARCHAR(20) NOT NULL DEFAULT 'unknown' AFTER id,
                         ADD INDEX idx_exchange (exchange)
-                    """)
+                                         """)
                     logger.info("Колонка exchange добавлена")
 
                 # Проверяем, есть ли колонка base_asset
                 check_base_asset_column_sql = """
-                SELECT COUNT(*) 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_SCHEMA = %s 
-                AND TABLE_NAME = 'large_trades' 
-                AND COLUMN_NAME = 'base_asset'
-                """
+                                              SELECT COUNT(*)
+                                              FROM INFORMATION_SCHEMA.COLUMNS
+                                              WHERE TABLE_SCHEMA = %s
+                                                AND TABLE_NAME = 'large_trades'
+                                                AND COLUMN_NAME = 'base_asset' \
+                                              """
                 await cursor.execute(check_base_asset_column_sql, (MYSQL_CONFIG['db'],))
                 result = await cursor.fetchone()
 
@@ -105,9 +149,9 @@ class DatabaseManager:
                     # Колонки base_asset нет, нужно добавить
                     logger.info("Добавляем колонку base_asset в существующую таблицу...")
                     await cursor.execute("""
-                        ALTER TABLE large_trades 
-                        ADD COLUMN base_asset VARCHAR(10) AFTER symbol
-                    """)
+                                         ALTER TABLE large_trades
+                                             ADD COLUMN base_asset VARCHAR(10) AFTER symbol
+                                         """)
                     logger.info("Колонка base_asset добавлена")
 
                 logger.info("Таблица large_trades готова к работе")
@@ -236,18 +280,18 @@ class DatabaseManager:
         """
         if exchange:
             query = """
-            SELECT COUNT(*) 
-            FROM large_trades 
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL %s HOUR)
-            AND exchange = %s
-            """
+                    SELECT COUNT(*)
+                    FROM large_trades
+                    WHERE trade_time > DATE_SUB(NOW(), INTERVAL %s HOUR)
+                      AND exchange = %s \
+                    """
             params = (hours, exchange)
         else:
             query = """
-            SELECT COUNT(*) 
-            FROM large_trades 
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL %s HOUR)
-            """
+                    SELECT COUNT(*)
+                    FROM large_trades
+                    WHERE trade_time > DATE_SUB(NOW(), INTERVAL %s HOUR) \
+                    """
             params = (hours,)
 
         async with self.pool.acquire() as conn:
@@ -268,26 +312,24 @@ class DatabaseManager:
         """
         if exchange:
             query = """
-            SELECT 
-                COUNT(*) as trade_count,
-                SUM(value_usd) as total_volume,
-                AVG(value_usd) as avg_trade_size,
-                MAX(value_usd) as max_trade_size
-            FROM large_trades
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            AND exchange = %s
-            """
+                    SELECT COUNT(*)       as trade_count,
+                           SUM(value_usd) as total_volume,
+                           AVG(value_usd) as avg_trade_size,
+                           MAX(value_usd) as max_trade_size
+                    FROM large_trades
+                    WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                      AND exchange = %s \
+                    """
             params = (exchange,)
         else:
             query = """
-            SELECT 
-                COUNT(*) as trade_count,
-                SUM(value_usd) as total_volume,
-                AVG(value_usd) as avg_trade_size,
-                MAX(value_usd) as max_trade_size
-            FROM large_trades
-            WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            """
+                    SELECT COUNT(*)       as trade_count,
+                           SUM(value_usd) as total_volume,
+                           AVG(value_usd) as avg_trade_size,
+                           MAX(value_usd) as max_trade_size
+                    FROM large_trades
+                    WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR) \
+                    """
             params = ()
 
         stats = {}
@@ -312,17 +354,16 @@ class DatabaseManager:
             Словарь со статистикой по биржам
         """
         query = """
-        SELECT 
-            exchange,
-            COUNT(*) as trade_count,
-            SUM(value_usd) as total_volume,
-            AVG(value_usd) as avg_trade_size,
-            MAX(value_usd) as max_trade_size
-        FROM large_trades
-        WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
-        GROUP BY exchange
-        ORDER BY total_volume DESC
-        """
+                SELECT exchange,
+                       COUNT(*)       as trade_count,
+                       SUM(value_usd) as total_volume,
+                       AVG(value_usd) as avg_trade_size,
+                       MAX(value_usd) as max_trade_size
+                FROM large_trades
+                WHERE trade_time > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                GROUP BY exchange
+                ORDER BY total_volume DESC \
+                """
 
         stats_by_exchange = {}
         async with self.pool.acquire() as conn:
@@ -339,3 +380,6 @@ class DatabaseManager:
                     }
 
         return stats_by_exchange
+
+
+

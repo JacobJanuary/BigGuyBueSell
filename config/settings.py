@@ -44,6 +44,11 @@ MAX_WEIGHT_PER_MINUTE = get_env_int('MAX_WEIGHT_PER_MINUTE', 1200)
 DELAY_BETWEEN_REQUESTS = float(os.getenv('DELAY_BETWEEN_REQUESTS', '0.2'))
 RETRY_DELAY = get_env_int('RETRY_DELAY', 5)
 MAX_RETRIES = get_env_int('MAX_RETRIES', 3)
+# Настройки кэша торговых пар
+PAIRS_CACHE_UPDATE_MINUTES = get_env_int('PAIRS_CACHE_UPDATE_MINUTES', 60)  # Интервал обновления кэша
+PAIRS_CACHE_TTL_HOURS = get_env_int('PAIRS_CACHE_TTL_HOURS', 2)  # Время жизни кэша
+PAIRS_CACHE_CLEANUP_DAYS = get_env_int('PAIRS_CACHE_CLEANUP_DAYS', 7)  # Очистка старых записей
+
 MONITORING_PAUSE_MINUTES = get_env_int('MONITORING_PAUSE_MINUTES', 5)
 BATCH_SIZE = get_env_int('BATCH_SIZE', 30)
 STATS_REPORT_MINUTES = get_env_int('STATS_REPORT_MINUTES', 10)
