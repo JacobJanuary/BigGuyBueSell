@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
 """
-Главный модуль с поддержкой трех бирж:
-- Binance: обычные циклы
-- Bybit: агрессивный непрерывный мониторинг
-- Coinbase: агрессивный непрерывный мониторинг
+Главный модуль с агрессивным мониторингом Bybit.
+Binance работает в обычном режиме, Bybit - в режиме непрерывного мониторинга.
 """
-
-# ПОДАВЛЕНИЕ ПРЕДУПРЕЖДЕНИЙ MYSQL (должно быть в самом начале)
-import warnings
-
-warnings.filterwarnings("ignore")
-warnings.filterwarnings('ignore', message='.*Data truncated.*')
-warnings.filterwarnings('ignore', message='.*truncated.*')
-
 import asyncio
 import logging
 import os
@@ -23,18 +13,6 @@ from typing import List, Dict, Tuple
 import aiohttp
 from aiohttp import TCPConnector
 
-# Дополнительное подавление после импортов
-try:
-    import pymysql
-
-    warnings.filterwarnings('ignore', category=pymysql.Warning)
-except ImportError:
-    pass
-
-# Подавляем логгеры MySQL
-logging.getLogger('aiomysql').setLevel(logging.ERROR)
-logging.getLogger('pymysql').setLevel(logging.ERROR)
-
 from config.settings import (
     MIN_TRADE_VALUE_USD, MONITORING_PAUSE_MINUTES, BATCH_SIZE,
     MAX_CONCURRENT_REQUESTS, MAX_WEIGHT_PER_MINUTE, DISABLE_SSL_VERIFY
@@ -44,14 +22,14 @@ from database.models import Trade
 from exchanges.binance.client import BinanceClient
 from exchanges.binance.analyzer import BinanceAnalyzer
 from exchanges.bybit.analyzer import BybitAnalyzer
-from exchanges.coinbase.analyzer import CoinbaseAnalyzer
-from exchanges.coinbase.aggressive_client import CoinbaseAggressiveClient
-from bybit_continuous_monitor import BybitAggressiveClient
+from bybit_continuous_monitor import BybitAggressiveClient  # Новый агрессивный клиент
 from utils.logger import setup_logging
 from utils.rate_limiter import RateLimiter
 from utils.ssl_helper import create_ssl_context
 
 logger = logging.getLogger(__name__)
+
+import suppress_warnings  # Подавляет все предупреждения MySQL
 
 
 async def process_pair_binance(
@@ -163,103 +141,85 @@ async def process_binance_exchange(
     return ("binance", total_new, total_duplicates, total_found)
 
 
-async def setup_aggressive_monitoring(
-        exchange_name: str,
-        client,
-        analyzer,
+async def setup_bybit_aggressive_monitoring(
+        client: BybitAggressiveClient,
+        analyzer: BybitAnalyzer,
         db_manager: DatabaseManager
 ) -> asyncio.Task:
-    """Настраивает агрессивный мониторинг для биржи."""
+    """Настраивает и запускает агрессивный мониторинг Bybit."""
 
     try:
-        logger.info(f"Настройка агрессивного мониторинга {exchange_name.upper()}")
+        logger.info("Настройка агрессивного мониторинга BYBIT")
 
         # Получаем информацию о парах
-        if exchange_name == 'bybit':
-            exchange_info = await client.get_instruments_info()
-            tickers = await client.get_24hr_tickers()
-        elif exchange_name == 'coinbase':
-            exchange_info = await client.get_products()
-            tickers = await client.get_24hr_stats()  # Может быть пустым
-        else:
-            logger.warning(f"Неизвестная биржа для агрессивного мониторинга: {exchange_name}")
-            return None
+        exchange_info = await client.get_instruments_info()
+        tickers = await client.get_24hr_tickers()
 
         # Фильтруем пары
         filtered_pairs = analyzer.filter_trading_pairs(exchange_info, tickers)
 
         if not filtered_pairs:
-            logger.warning(f"Не найдено подходящих пар на {exchange_name}")
+            logger.warning("Не найдено подходящих пар на Bybit")
             return None
 
-        # Сортируем по объему
+        # Сортируем по объему и берем топ пары для агрессивного мониторинга
         sorted_pairs = sorted(
             filtered_pairs,
             key=lambda x: x.volume_24h_usd,
             reverse=True
         )
 
-        logger.info(f"Топ-10 пар {exchange_name.upper()} для агрессивного мониторинга:")
+        logger.info("Топ-10 пар BYBIT для агрессивного мониторинга:")
         for i, pair in enumerate(sorted_pairs[:10], 1):
             logger.info(f"{i}. {pair.symbol}: ${pair.volume_24h_usd:,.0f}")
 
         # Запускаем агрессивный мониторинг в отдельной задаче
         monitor_task = asyncio.create_task(
             client.start_aggressive_monitoring(sorted_pairs, db_manager),
-            name=f"{exchange_name}_aggressive_monitor"
+            name="bybit_aggressive_monitor"
         )
 
         return monitor_task
 
     except Exception as e:
-        logger.error(f"Ошибка настройки агрессивного мониторинга {exchange_name}: {e}")
+        logger.error(f"Ошибка настройки агрессивного мониторинга Bybit: {e}")
         return None
 
 
 async def run_hybrid_monitoring_cycle(
         binance_data: Dict,
-        aggressive_clients: Dict,
+        bybit_client: BybitAggressiveClient,
         db_manager: DatabaseManager
 ) -> None:
     """
-    Выполняет гибридный цикл:
-    - Binance: батчевая обработка
-    - Bybit + Coinbase: непрерывный агрессивный мониторинг
+    Выполняет гибридный цикл: Binance батчами, Bybit непрерывно.
     """
     logger.info("Запуск гибридного мониторинга:")
     logger.info("• Binance: батчевая обработка с паузами")
-    for exchange in aggressive_clients.keys():
-        logger.info(f"• {exchange.title()}: непрерывный агрессивный мониторинг")
+    logger.info("• Bybit: непрерывный агрессивный мониторинг")
 
     # Обрабатываем Binance в обычном режиме
-    binance_result = None
-    if binance_data:
-        binance_result = await process_binance_exchange(
-            binance_data['client'],
-            binance_data['analyzer'],
-            db_manager
-        )
+    binance_result = await process_binance_exchange(
+        binance_data['client'],
+        binance_data['analyzer'],
+        db_manager
+    )
 
-    # Получаем статистику агрессивных клиентов
-    aggressive_stats = {}
-    for exchange_name, client in aggressive_clients.items():
-        stats = await client.get_monitoring_stats()
-        aggressive_stats[exchange_name] = stats
+    # Получаем статистику Bybit
+    bybit_stats = await bybit_client.get_monitoring_stats()
 
     # Показываем результаты
     print(f"\n{'=' * 80}")
     print(f"ИТОГИ ГИБРИДНОГО ЦИКЛА МОНИТОРИНГА:")
     print(f"{'=' * 80}")
 
-    if binance_result:
-        exchange_name, new_count, dup_count, found_count = binance_result
-        print(f"{'BINANCE':>12}: найдено {found_count:>4} | "
-              f"новых {new_count:>4} | дубликатов {dup_count:>4}")
+    exchange_name, new_count, dup_count, found_count = binance_result
+    print(f"{'BINANCE':>12}: найдено {found_count:>4} | "
+          f"новых {new_count:>4} | дубликатов {dup_count:>4}")
 
-    for exchange_name, stats in aggressive_stats.items():
-        print(f"{exchange_name.upper():>12}: непрерывный мониторинг | "
-              f"запросов {stats.get('total_requests', 0):>4} | "
-              f"крупных {stats.get('large_trades_found', 0):>4}")
+    print(f"{'BYBIT':>12}: непрерывный мониторинг | "
+          f"запросов {bybit_stats.get('total_requests', 0):>4} | "
+          f"сделок {bybit_stats.get('trades_found', 0):>4}")
 
     print(f"{'=' * 80}")
 
@@ -295,12 +255,11 @@ async def main() -> None:
     """Основная функция программы."""
     print("""
     ╔═══════════════════════════════════════════════════╗
-    ║      CRYPTO LARGE TRADES MONITOR v4.0             ║
+    ║      CRYPTO LARGE TRADES MONITOR v3.0             ║
     ║                                                   ║
-    ║  Трехбиржевой гибридный мониторинг               ║
+    ║  Гибридный мониторинг крупных сделок             ║
     ║  • Binance: батчевая обработка                   ║
-    ║  • Bybit: агрессивный непрерывный мониторинг     ║
-    ║  • Coinbase: агрессивный непрерывный мониторинг  ║
+    ║  • Bybit: непрерывный агрессивный мониторинг     ║
     ║  Минимальная сумма сделки: $49,000               ║
     ╚═══════════════════════════════════════════════════╝
     """)
@@ -318,7 +277,7 @@ async def main() -> None:
         timeout = aiohttp.ClientTimeout(total=30)
         connector = TCPConnector(
             ssl=ssl_context,
-            limit=150,  # Увеличиваем для трех бирж
+            limit=100,  # Увеличиваем лимиты для агрессивного мониторинга
             limit_per_host=50
         )
 
@@ -327,24 +286,20 @@ async def main() -> None:
                 timeout=timeout
         ) as session:
 
-            # Инициализируем все биржи
+            # Инициализируем биржи
             binance_data = {
                 'client': BinanceClient(session, RateLimiter(MAX_WEIGHT_PER_MINUTE)),
                 'analyzer': BinanceAnalyzer()
             }
 
-            bybit_client = BybitAggressiveClient(session, None)
+            bybit_client = BybitAggressiveClient(session, None)  # Rate limiter не используется
             bybit_analyzer = BybitAnalyzer()
 
-            coinbase_client = CoinbaseAggressiveClient(session, None)
-            coinbase_analyzer = CoinbaseAnalyzer()
-
-            # Тестируем соединения с всеми биржами
+            # Тестируем соединения
             logger.info("Тестирование соединений с биржами...")
 
             binance_ok = await binance_data['client'].test_connection()
             bybit_ok = await bybit_client.test_connection()
-            coinbase_ok = await coinbase_client.test_connection()
 
             if not binance_ok:
                 logger.error("Не удалось подключиться к Binance")
@@ -354,46 +309,28 @@ async def main() -> None:
                 logger.error("Не удалось подключиться к Bybit")
                 bybit_client = None
 
-            if not coinbase_ok:
-                logger.error("Не удалось подключиться к Coinbase")
-                coinbase_client = None
-
-            if not any([binance_ok, bybit_ok, coinbase_ok]):
+            if not binance_ok and not bybit_ok:
                 logger.error("Не удалось подключиться ни к одной бирже")
                 return
 
-            # Подготавливаем список активных бирж
             active_exchanges = []
             if binance_ok:
-                active_exchanges.append("Binance (циклы)")
+                active_exchanges.append("Binance")
             if bybit_ok:
                 active_exchanges.append("Bybit (агрессивный)")
-            if coinbase_ok:
-                active_exchanges.append("Coinbase (агрессивный)")
 
             logger.info(f"Успешно подключены биржи: {', '.join(active_exchanges)}")
 
-            # Запускаем агрессивный мониторинг для Bybit и Coinbase
-            aggressive_monitor_tasks = {}
-            aggressive_clients = {}
-
+            # Запускаем агрессивный мониторинг Bybit в фоне
+            bybit_monitor_task = None
             if bybit_ok:
-                bybit_task = await setup_aggressive_monitoring(
-                    'bybit', bybit_client, bybit_analyzer, db_manager
+                bybit_monitor_task = await setup_bybit_aggressive_monitoring(
+                    bybit_client, bybit_analyzer, db_manager
                 )
-                if bybit_task:
-                    aggressive_monitor_tasks['bybit'] = bybit_task
-                    aggressive_clients['bybit'] = bybit_client
+                if bybit_monitor_task:
                     logger.info("🚀 Агрессивный мониторинг Bybit запущен в фоне")
-
-            if coinbase_ok:
-                coinbase_task = await setup_aggressive_monitoring(
-                    'coinbase', coinbase_client, coinbase_analyzer, db_manager
-                )
-                if coinbase_task:
-                    aggressive_monitor_tasks['coinbase'] = coinbase_task
-                    aggressive_clients['coinbase'] = coinbase_client
-                    logger.info("🚀 Агрессивный мониторинг Coinbase запущен в фоне")
+                else:
+                    logger.warning("Не удалось запустить агрессивный мониторинг Bybit")
 
             # Основной цикл мониторинга
             cycle_count = 0
@@ -405,11 +342,11 @@ async def main() -> None:
 
                     print(f"\n{'#' * 80}")
                     print(f"НАЧАЛО ЦИКЛА #{cycle_count} | Время: {current_time}")
-                    print(f"Режим: ТРЕХБИРЖЕВОЙ ГИБРИДНЫЙ")
+                    print(f"Режим: ГИБРИДНЫЙ")
                     if binance_ok:
                         print(f"• Binance: батчевая обработка с паузами")
-                    for exchange in aggressive_clients.keys():
-                        print(f"• {exchange.title()}: непрерывный мониторинг (фоновый)")
+                    if bybit_ok:
+                        print(f"• Bybit: непрерывный мониторинг (фоновый)")
                     print(f"SSL проверка: {'включена' if verify_ssl else 'ОТКЛЮЧЕНА'}")
                     print(f"{'#' * 80}\n")
 
@@ -417,39 +354,50 @@ async def main() -> None:
                         start_time = asyncio.get_event_loop().time()
 
                         # Запускаем гибридный мониторинг
-                        await run_hybrid_monitoring_cycle(
-                            binance_data, aggressive_clients, db_manager
-                        )
+                        if binance_ok:
+                            await run_hybrid_monitoring_cycle(
+                                binance_data, bybit_client, db_manager
+                            )
+                        else:
+                            # Только показываем статистику Bybit
+                            if bybit_ok:
+                                bybit_stats = await bybit_client.get_monitoring_stats()
+                                print(f"\n{'=' * 80}")
+                                print(f"СТАТИСТИКА НЕПРЕРЫВНОГО МОНИТОРИНГА BYBIT:")
+                                print(f"{'=' * 80}")
+                                print(f"Всего запросов: {bybit_stats.get('total_requests', 0)}")
+                                print(f"Успешных запросов: {bybit_stats.get('successful_requests', 0)}")
+                                print(f"Ошибок: {bybit_stats.get('errors', 0)}")
+                                print(f"Сделок найдено: {bybit_stats.get('trades_found', 0)}")
+                                print(
+                                    f"Крупных сделок: {bybit_stats.get('large_trades_found', 0)} (${MIN_TRADE_VALUE_USD}+)")
+                                print(f"Мелких отфильтровано: {bybit_stats.get('small_trades_filtered', 0)}")
+                                print(f"Сделок сохранено: {bybit_stats.get('trades_saved', 0)}")
+                                print(f"Дубликатов отфильтровано: {bybit_stats.get('duplicates_filtered', 0)}")
+                                print(f"{'=' * 80}\n")
 
                         end_time = asyncio.get_event_loop().time()
                         cycle_duration = end_time - start_time
                         logger.info(f"Цикл #{cycle_count} завершен за {cycle_duration:.1f} секунд")
 
-                        # Проверяем состояние фоновых мониторингов
-                        for exchange_name, task in list(aggressive_monitor_tasks.items()):
-                            if task.done():
-                                logger.warning(f"⚠️ Агрессивный мониторинг {exchange_name} завершился неожиданно")
-                                try:
-                                    await task  # Проверяем на исключения
-                                except Exception as e:
-                                    logger.error(f"Ошибка в агрессивном мониторинге {exchange_name}: {e}")
+                        # Проверяем состояние фонового мониторинга Bybit
+                        if bybit_monitor_task and bybit_monitor_task.done():
+                            logger.warning("⚠️ Агрессивный мониторинг Bybit завершился неожиданно")
+                            try:
+                                await bybit_monitor_task  # Проверяем на исключения
+                            except Exception as e:
+                                logger.error(f"Ошибка в агрессивном мониторинге Bybit: {e}")
 
-                                # Пытаемся перезапустить
-                                logger.info(f"Попытка перезапуска агрессивного мониторинга {exchange_name}...")
-                                client = aggressive_clients[exchange_name]
-                                analyzer = bybit_analyzer if exchange_name == 'bybit' else coinbase_analyzer
+                            # Пытаемся перезапустить
+                            logger.info("Попытка перезапуска агрессивного мониторинга Bybit...")
+                            bybit_monitor_task = await setup_bybit_aggressive_monitoring(
+                                bybit_client, bybit_analyzer, db_manager
+                            )
 
-                                new_task = await setup_aggressive_monitoring(
-                                    exchange_name, client, analyzer, db_manager
-                                )
-                                if new_task:
-                                    aggressive_monitor_tasks[exchange_name] = new_task
-
-                        # Пауза между циклами
+                        # Пауза между циклами (только для Binance, Bybit работает непрерывно)
                         if binance_ok:
                             logger.info(f"Пауза {MONITORING_PAUSE_MINUTES} минут до следующего цикла Binance...")
-                            aggressive_info = f"({', '.join(aggressive_clients.keys())} продолжают непрерывный мониторинг)"
-                            logger.info(aggressive_info)
+                            logger.info("(Bybit продолжает непрерывный мониторинг)")
 
                             # Обратный отсчет
                             for remaining in range(MONITORING_PAUSE_MINUTES * 60, 0, -30):
@@ -459,8 +407,8 @@ async def main() -> None:
                                 await asyncio.sleep(min(30, remaining))
                             print()
                         else:
-                            # Если только агрессивные биржи, делаем меньшую паузу
-                            await asyncio.sleep(120)  # 2 минуты
+                            # Если только Bybit, делаем меньшую паузу
+                            await asyncio.sleep(60)
 
                     except KeyboardInterrupt:
                         logger.info("Получен сигнал остановки (Ctrl+C)")
@@ -471,25 +419,16 @@ async def main() -> None:
                         await asyncio.sleep(60)
 
             finally:
-                # Останавливаем все агрессивные мониторинги
-                logger.info("Остановка всех агрессивных мониторингов...")
+                # Останавливаем агрессивный мониторинг Bybit
+                if bybit_monitor_task and not bybit_monitor_task.done():
+                    logger.info("Остановка агрессивного мониторинга Bybit...")
+                    await bybit_client.stop_monitoring()
 
-                for exchange_name, client in aggressive_clients.items():
-                    logger.info(f"Остановка мониторинга {exchange_name}...")
-                    await client.stop_monitoring()
-
-                # Ждем завершения задач
-                if aggressive_monitor_tasks:
                     try:
-                        await asyncio.wait_for(
-                            asyncio.gather(*aggressive_monitor_tasks.values(), return_exceptions=True),
-                            timeout=15.0
-                        )
+                        await asyncio.wait_for(bybit_monitor_task, timeout=10.0)
                     except asyncio.TimeoutError:
-                        logger.warning("Таймаут при остановке агрессивных мониторингов")
-                        for task in aggressive_monitor_tasks.values():
-                            if not task.done():
-                                task.cancel()
+                        logger.warning("Таймаут при остановке мониторинга Bybit")
+                        bybit_monitor_task.cancel()
 
     except KeyboardInterrupt:
         logger.info("Программа остановлена пользователем")
@@ -497,7 +436,7 @@ async def main() -> None:
         logger.error(f"Критическая ошибка: {e}")
     finally:
         await db_manager.close()
-        logger.info("Трехбиржевой мониторинг завершен")
+        logger.info("Мониторинг завершен")
 
 
 if __name__ == "__main__":
