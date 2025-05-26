@@ -27,9 +27,17 @@ class DatabaseManager:
                 **MYSQL_CONFIG,
                 autocommit=True,
                 minsize=1,
-                maxsize=10
+                maxsize=10,
+                # Подавляем предупреждения MySQL
+                init_command="SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO'"
             )
             logger.info("Подключение к MySQL установлено")
+
+            # Дополнительно настраиваем подавление предупреждений
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SET SESSION sql_warnings = 0")
+
         except Exception as e:
             logger.error(f"Ошибка подключения к MySQL: {e}")
             raise
@@ -49,9 +57,9 @@ class DatabaseManager:
             exchange VARCHAR(20) NOT NULL DEFAULT 'unknown',
             symbol VARCHAR(20) NOT NULL,
             base_asset VARCHAR(10),
-            price DECIMAL(20, 8) NOT NULL,
-            quantity DECIMAL(20, 8) NOT NULL,
-            value_usd DECIMAL(20, 2) NOT NULL,
+            price DECIMAL(30, 12) NOT NULL,
+            quantity DECIMAL(30, 12) NOT NULL,
+            value_usd DECIMAL(30, 2) NOT NULL,
             quote_asset VARCHAR(10) NOT NULL,
             is_buyer_maker BOOLEAN NOT NULL,
             trade_time DATETIME NOT NULL,
@@ -66,51 +74,58 @@ class DatabaseManager:
 
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
+                # Подавляем предупреждения для этой сессии
+                await cursor.execute("SET SESSION sql_warnings = 0")
+
                 # Сначала создаем таблицу если не существует
                 await cursor.execute(create_table_sql)
 
-                # Проверяем, есть ли колонка exchange
-                check_exchange_column_sql = """
-                SELECT COUNT(*) 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_SCHEMA = %s 
-                AND TABLE_NAME = 'large_trades' 
-                AND COLUMN_NAME = 'exchange'
-                """
-                await cursor.execute(check_exchange_column_sql, (MYSQL_CONFIG['db'],))
-                result = await cursor.fetchone()
-
-                if result[0] == 0:
-                    # Колонки exchange нет, нужно добавить
-                    logger.info("Добавляем колонку exchange в существующую таблицу...")
-                    await cursor.execute("""
-                        ALTER TABLE large_trades 
-                        ADD COLUMN exchange VARCHAR(20) NOT NULL DEFAULT 'unknown' AFTER id,
-                        ADD INDEX idx_exchange (exchange)
-                    """)
-                    logger.info("Колонка exchange добавлена")
-
-                # Проверяем, есть ли колонка base_asset
-                check_base_asset_column_sql = """
-                SELECT COUNT(*) 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_SCHEMA = %s 
-                AND TABLE_NAME = 'large_trades' 
-                AND COLUMN_NAME = 'base_asset'
-                """
-                await cursor.execute(check_base_asset_column_sql, (MYSQL_CONFIG['db'],))
-                result = await cursor.fetchone()
-
-                if result[0] == 0:
-                    # Колонки base_asset нет, нужно добавить
-                    logger.info("Добавляем колонку base_asset в существующую таблицу...")
-                    await cursor.execute("""
-                        ALTER TABLE large_trades 
-                        ADD COLUMN base_asset VARCHAR(10) AFTER symbol
-                    """)
-                    logger.info("Колонка base_asset добавлена")
+                # Проверяем и обновляем колонки при необходимости
+                await self._update_table_schema(cursor)
 
                 logger.info("Таблица large_trades готова к работе")
+
+    async def _update_table_schema(self, cursor) -> None:
+        """Обновляет схему таблицы для поддержки больших значений."""
+
+        # Проверяем текущую структуру таблицы
+        await cursor.execute("DESCRIBE large_trades")
+        columns_info = await cursor.fetchall()
+        columns_dict = {row[0]: row[1] for row in columns_info}
+
+        schema_updates = []
+
+        # Проверяем колонку exchange
+        if 'exchange' not in columns_dict:
+            schema_updates.append("ADD COLUMN exchange VARCHAR(20) NOT NULL DEFAULT 'unknown' AFTER id")
+            schema_updates.append("ADD INDEX idx_exchange (exchange)")
+
+        # Проверяем колонку base_asset
+        if 'base_asset' not in columns_dict:
+            schema_updates.append("ADD COLUMN base_asset VARCHAR(10) AFTER symbol")
+
+        # Проверяем размеры DECIMAL полей и обновляем при необходимости
+        decimal_updates = []
+
+        if 'price' in columns_dict and not columns_dict['price'].startswith('decimal(30,'):
+            decimal_updates.append("MODIFY COLUMN price DECIMAL(30, 12) NOT NULL")
+
+        if 'quantity' in columns_dict and not columns_dict['quantity'].startswith('decimal(30,'):
+            decimal_updates.append("MODIFY COLUMN quantity DECIMAL(30, 12) NOT NULL")
+
+        if 'value_usd' in columns_dict and not columns_dict['value_usd'].startswith('decimal(30,'):
+            decimal_updates.append("MODIFY COLUMN value_usd DECIMAL(30, 2) NOT NULL")
+
+        # Выполняем обновления
+        all_updates = schema_updates + decimal_updates
+
+        for update in all_updates:
+            try:
+                await cursor.execute(f"ALTER TABLE large_trades {update}")
+                logger.info(f"Схема обновлена: {update}")
+            except Exception as e:
+                # Игнорируем ошибки если колонка уже существует или обновление не нужно
+                logger.debug(f"Обновление схемы пропущено: {update} - {e}")
 
     async def save_trades(self, trades: List[Trade]) -> Tuple[int, int]:
         """
