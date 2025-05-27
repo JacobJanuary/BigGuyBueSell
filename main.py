@@ -24,6 +24,8 @@ from exchanges.bybit.client import BybitClient
 from exchanges.bybit.analyzer import BybitAnalyzer
 from exchanges.coinbase.client import CoinbaseClient
 from exchanges.coinbase.analyzer import CoinbaseAnalyzer
+from exchanges.okx.client import OKXClient
+from exchanges.okx.analyzer import OKXAnalyzer
 from utils.logger import setup_logging
 from utils.rate_limiter import RateLimiter
 from utils.ssl_helper import create_ssl_context
@@ -93,6 +95,9 @@ async def setup_exchanges(session: aiohttp.ClientSession, db_manager: DatabaseMa
             elif exchange_name == 'coinbase':
                 client = CoinbaseClient(session, RateLimiter(config['rate_limit']))
                 analyzer = CoinbaseAnalyzer()
+            elif exchange_name == 'okx':
+                client = OKXClient(session, RateLimiter(config['rate_limit']))
+                analyzer = OKXAnalyzer()
             else:
                 logger.warning(f"⚠️  Неизвестная биржа: {exchange_name}")
                 continue

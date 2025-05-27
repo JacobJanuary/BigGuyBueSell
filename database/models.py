@@ -198,6 +198,56 @@ class Trade:
         return trade
 
 
+
+    @classmethod
+    def from_okx_response(
+        cls,
+        data: Dict,
+        symbol: str,
+        base_asset: str,
+        quote_asset: str,
+        quote_price_usd: Decimal
+    ) -> 'Trade':
+        """
+        Создает объект Trade из ответа OKX API.
+
+        Args:
+            data: Словарь с данными сделки от API
+            symbol: Символ торговой пары
+            base_asset: Базовый актив
+            quote_asset: Котировочный актив
+            quote_price_usd: Цена котировочного актива в USD
+
+        Returns:
+            Объект Trade
+        """
+        price = Decimal(str(data['px']))
+        size = Decimal(str(data['sz']))
+        value_usd = price * size * quote_price_usd
+
+        # В OKX время в миллисекундах
+        trade_time_ms = int(data['ts'])
+
+        trade = cls(
+            id=str(data['tradeId']),
+            exchange='okx',  # Явно указываем exchange
+            symbol=symbol,
+            base_asset=base_asset,
+            price=price,
+            quantity=size,
+            value_usd=value_usd,
+            quote_asset=quote_asset,
+            is_buyer_maker=data['side'] == 'sell',  # В OKX sell = buyer maker
+            trade_time=trade_time_ms
+        )
+
+        # Отладочная информация для первых сделок
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Создана сделка OKX: {trade.exchange} - {symbol} - ${value_usd:.2f}")
+
+        return trade
+
 @dataclass
 class TradingPairInfo:
     """Информация о торговой паре."""

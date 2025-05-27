@@ -148,6 +148,10 @@ class ExchangeWorker:
                 products_info = await self.client.get_products_info()
                 tickers = await self.client.get_24hr_tickers()
                 filtered_pairs = self.analyzer.filter_trading_pairs(products_info, tickers)
+            elif self.exchange_name == 'okx':
+                exchange_info = await self.client.get_instruments_info()
+                tickers = await self.client.get_24hr_tickers()
+                filtered_pairs = self.analyzer.filter_trading_pairs(exchange_info, tickers)
             else:
                 logger.error(f"[{self.exchange_name.upper()}] Неизвестная биржа для API обновления")
                 return None

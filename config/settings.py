@@ -99,7 +99,7 @@ EXCHANGES_CONFIG = {
         'trades_limit': get_env_int('OKX_TRADES_LIMIT', 100),
         'cycle_pause_minutes': get_env_int('OKX_CYCLE_MINUTES', 4),
         'rate_limit': get_env_int('OKX_RATE_LIMIT', MAX_WEIGHT_PER_MINUTE),
-        'enabled': get_env_bool('OKX_ENABLED', False),
+        'enabled': get_env_bool('OKX_ENABLED', True),  # ← ВАЖНО: True!
         'weights': {
             'trades': 1,
             'exchange_info': 1,
