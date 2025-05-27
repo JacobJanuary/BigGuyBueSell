@@ -118,3 +118,26 @@ if LOG_LEVEL == 'DEBUG':
             print(f"  {exchange.upper()}: пауза {config['cycle_pause_minutes']}мин, лимит {config['rate_limit']}/мин")
         else:
             print(f"  {exchange.upper()}: ОТКЛЮЧЕН")
+
+# =================== ОПТИМИЗАЦИЯ КЭШИРОВАНИЯ ===================
+
+# Основные настройки кэширования
+CACHE_OPTIMIZATION_ENABLED = get_env_bool('CACHE_OPTIMIZATION_ENABLED', True)
+MEMORY_CACHE_ENABLED = get_env_bool('MEMORY_CACHE_ENABLED', True)
+MEMORY_CACHE_TTL_MINUTES = get_env_int('MEMORY_CACHE_TTL_MINUTES', 30)
+API_UPDATE_INTERVAL_MINUTES = get_env_int('API_UPDATE_INTERVAL_MINUTES', 60)
+DB_CACHE_TTL_HOURS = get_env_int('DB_CACHE_TTL_HOURS', 2)
+
+# Настройки мониторинга кэша
+CACHE_METRICS_ENABLED = get_env_bool('CACHE_METRICS_ENABLED', True)
+CACHE_FALLBACK_ENABLED = get_env_bool('CACHE_FALLBACK_ENABLED', True)
+CACHE_DEBUG_LOGGING = get_env_bool('CACHE_DEBUG_LOGGING', False)
+
+# Пороги для оптимизации
+CACHE_HIT_RATE_WARNING_THRESHOLD = get_env_int('CACHE_HIT_RATE_WARNING_THRESHOLD', 70)
+API_CALLS_PER_HOUR_WARNING = get_env_int('API_CALLS_PER_HOUR_WARNING', 10)
+
+if LOG_LEVEL == 'DEBUG':
+    print("🚀 Настройки оптимизированного кэширования загружены")
+
+# ============================================================
